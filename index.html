@@ -1,0 +1,626 @@
+<!DOCTYPE html>
+<html lang="it">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+<title>Le Missioni di Virginia</title>
+<meta name="apple-mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+<meta name="apple-mobile-web-app-title" content="Missioni Virginia" />
+<script crossorigin src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+<script crossorigin src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.5/babel.min.js"></script>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Baloo+2:wght@500;700;800&family=Quicksand:wght@500;600;700&display=swap');
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; }
+  #root { min-height: 100vh; }
+</style>
+</head>
+<body>
+<div id="root"></div>
+
+<script type="text/babel" data-presets="react">
+const { useState, useRef, useEffect, useCallback } = React;
+
+/* ============================================================
+   LE MISSIONI DI VIRGINIA — versione facile/introduttiva
+   6 missioni: addizione, sottrazione, leggi (ITA/CAT), scrivi (CAT/ITA)
+   Lingua invertita a missioni alterne. Bias su 16/17 nei calcoli.
+   ============================================================ */
+
+let audioCtx = null;
+function getCtx() {
+  if (!audioCtx) {
+    const AC = window.AudioContext || window.webkitAudioContext;
+    audioCtx = new AC();
+  }
+  if (audioCtx.state === "suspended") audioCtx.resume();
+  return audioCtx;
+}
+function playTone(freq, start, dur, type = "sine", gainPeak = 0.18) {
+  try {
+    const ctx = getCtx();
+    const osc = ctx.createOscillator();
+    const gain = ctx.createGain();
+    osc.type = type;
+    osc.frequency.value = freq;
+    gain.gain.setValueAtTime(0.0001, ctx.currentTime + start);
+    gain.gain.exponentialRampToValueAtTime(gainPeak, ctx.currentTime + start + 0.02);
+    gain.gain.exponentialRampToValueAtTime(0.0001, ctx.currentTime + start + dur);
+    osc.connect(gain);
+    gain.connect(ctx.destination);
+    osc.start(ctx.currentTime + start);
+    osc.stop(ctx.currentTime + start + dur + 0.05);
+  } catch (e) {}
+}
+const Sound = {
+  correct: () => { playTone(660, 0, 0.12); playTone(880, 0.1, 0.18); },
+  wrong: () => { playTone(180, 0, 0.18, "sine", 0.12); },
+  exerciseDone: () => { [523, 659, 784, 1046].forEach((f, i) => playTone(f, i * 0.09, 0.16, "triangle", 0.16)); },
+  missionDone: () => { [392, 466, 523, 587, 659, 784, 880, 1046].forEach((f, i) => playTone(f, i * 0.08, 0.22, "triangle", 0.18)); },
+  tap: () => { playTone(420, 0, 0.06, "sine", 0.08); },
+};
+function useSound(enabled) {
+  return useCallback((fn) => { if (enabled) fn(); }, [enabled]);
+}
+
+const storage = {
+  get: async (key) => {
+    try { const v = localStorage.getItem(key); return v ? { key, value: v } : null; }
+    catch (e) { return null; }
+  },
+  set: async (key, value) => {
+    try { localStorage.setItem(key, value); return { key, value }; }
+    catch (e) { return null; }
+  },
+};
+
+// ---------- NUMERI IN LETTERE (IT e CA) ----------
+const NUM_IT = {0:"zero",1:"uno",2:"due",3:"tre",4:"quattro",5:"cinque",6:"sei",7:"sette",8:"otto",9:"nove",10:"dieci",11:"undici",12:"dodici",13:"tredici",14:"quattordici",15:"quindici",16:"sedici",17:"diciassette",18:"diciotto",19:"diciannove",20:"venti",21:"ventuno",22:"ventidue",23:"ventitré",24:"ventiquattro",25:"venticinque",26:"ventisei",27:"ventisette",28:"ventotto",29:"ventinove",30:"trenta",35:"trentacinque",40:"quaranta",45:"quarantacinque",50:"cinquanta"};
+function numToWordsIT(n) {
+  if (NUM_IT[n]) return NUM_IT[n];
+  const tens = Math.floor(n/10)*10, units = n%10;
+  const tensWords = {20:"venti",30:"trenta",40:"quaranta",50:"cinquanta"};
+  if (units === 1 || units === 8) return tensWords[tens].slice(0,-1) + numToWordsIT(units);
+  return tensWords[tens] + numToWordsIT(units);
+}
+
+// ---------- GENERATORE ADDIZIONI/SOTTRAZIONI con bias su 16/17 ----------
+function randInt(min, max) { return Math.floor(Math.random() * (max - min + 1)) + min; }
+
+function generateAddition(forceTarget) {
+  let result, a, b;
+  if (forceTarget) {
+    result = forceTarget;
+    a = randInt(1, result - 1);
+    b = result - a;
+  } else {
+    a = randInt(1, 30);
+    b = randInt(1, Math.min(50 - a, 30));
+    result = a + b;
+  }
+  return { a, b, result, type: "add" };
+}
+
+function generateSubtraction(forceTarget) {
+  let result, a, b;
+  if (forceTarget) {
+    result = forceTarget;
+    a = result + randInt(1, 25);
+    b = a - result;
+  } else {
+    a = randInt(10, 50);
+    b = randInt(1, a - 1);
+    result = a - b;
+  }
+  return { a, b, result, type: "sub" };
+}
+
+function makeCalcExercise(opType, forceBias) {
+  const target = forceBias ? (Math.random() < 0.5 ? 16 : 17) : null;
+  const calc = opType === "add" ? generateAddition(target) : generateSubtraction(target);
+  const correctWord = numToWordsIT(calc.result);
+  const wrongPool = [calc.result + 1, calc.result - 1, calc.result + 2].filter((n) => n >= 0 && n <= 60 && n !== calc.result);
+  const wrongWords = wrongPool.slice(0, 2).map(numToWordsIT);
+  const options = shuffle([correctWord, ...wrongWords]);
+  return {
+    type: "calc",
+    opType,
+    a: calc.a,
+    b: calc.b,
+    result: calc.result,
+    options,
+    answer: options.indexOf(correctWord),
+  };
+}
+
+// ---------- FRASI LEGGI/SCRIVI per missione (IT <-> CA) ----------
+const READ_SENTENCES_IT = [
+  { text: "Virginia gioca con la sua sorellina in giardino.", emoji: "🌻" },
+  { text: "Oggi il sole splende molto forte sul mare.", emoji: "☀️" },
+  { text: "Il gatto dorme tranquillo sul divano.", emoji: "🐱" },
+  { text: "Mangiamo il gelato dopo la spiaggia.", emoji: "🍦" },
+  { text: "La nonna prepara la torta al cioccolato.", emoji: "🎂" },
+  { text: "Domani andiamo in barca con papà.", emoji: "⛵" },
+];
+const READ_SENTENCES_CA = [
+  { text: "La Virginia juga amb la seva germana al jardí.", emoji: "🌻" },
+  { text: "Avui el sol brilla molt fort sobre el mar.", emoji: "☀️" },
+  { text: "El gat dorm tranquil al sofà.", emoji: "🐱" },
+  { text: "Mengem gelat després de la platja.", emoji: "🍦" },
+  { text: "L'àvia prepara el pastís de xocolata.", emoji: "🎂" },
+  { text: "Demà anirem en vaixell amb el papa.", emoji: "⛵" },
+];
+const WRITE_PROMPTS_CA = [
+  { prompt: "Scrivi: 'Il sole è giallo' in catalano", hint: "El sol és groc", emoji: "☀️" },
+  { prompt: "Scrivi: 'Il gatto è bianco' in catalano", hint: "El gat és blanc", emoji: "🐱" },
+  { prompt: "Scrivi: 'Ho una sorella' in catalano", hint: "Tinc una germana", emoji: "👧" },
+  { prompt: "Scrivi: 'Mi piace il mare' in catalano", hint: "M'agrada el mar", emoji: "🌊" },
+  { prompt: "Scrivi: 'La torta è buona' in catalano", hint: "El pastís és bo", emoji: "🎂" },
+  { prompt: "Scrivi: 'Vado in barca' in catalano", hint: "Vaig en vaixell", emoji: "⛵" },
+];
+const WRITE_PROMPTS_IT = [
+  { prompt: "Scrivi: 'El sol és groc' in italiano", hint: "Il sole è giallo", emoji: "☀️" },
+  { prompt: "Scrivi: 'El gat és blanc' in italiano", hint: "Il gatto è bianco", emoji: "🐱" },
+  { prompt: "Scrivi: 'Tinc una germana' in italiano", hint: "Ho una sorella", emoji: "👧" },
+  { prompt: "Scrivi: 'M'agrada el mar' in italiano", hint: "Mi piace il mare", emoji: "🌊" },
+  { prompt: "Scrivi: 'El pastís és bo' in italiano", hint: "La torta è buona", emoji: "🎂" },
+  { prompt: "Scrivi: 'Vaig en vaixell' in italiano", hint: "Vado in barca", emoji: "⛵" },
+];
+
+// ---------- COSTRUZIONE 6 MISSIONI ----------
+function buildMissions() {
+  const missions = [];
+  for (let m = 0; m < 6; m++) {
+    const invertLang = m % 2 === 1; // missioni dispari (1,3,5) invertite
+    const readFrom = invertLang ? "CA" : "IT";
+    const writeTo = invertLang ? "IT" : "CA";
+    const readPool = invertLang ? READ_SENTENCES_CA : READ_SENTENCES_IT;
+    const writePool = invertLang ? WRITE_PROMPTS_IT : WRITE_PROMPTS_CA;
+    const readItem = readPool[m % readPool.length];
+    const writeItem = writePool[m % writePool.length];
+
+    missions.push({
+      id: `mission-${m}`,
+      title: `Missione ${m + 1}`,
+      exercises: [
+        { id: `m${m}-add`, ...makeCalcExercise("add", m % 2 === 0) },
+        { id: `m${m}-sub`, ...makeCalcExercise("sub", m % 2 === 1) },
+        { id: `m${m}-read`, type: "read", lang: readFrom, text: readItem.text, emoji: readItem.emoji },
+        { id: `m${m}-write`, type: "write", lang: writeTo, prompt: writeItem.prompt, hint: writeItem.hint, emoji: writeItem.emoji },
+      ],
+    });
+  }
+  return missions;
+}
+const MISSIONS = buildMissions();
+const FLAT_EXERCISES = MISSIONS.flatMap((m) => m.exercises.map((e) => ({ ...e, missionId: m.id, missionTitle: m.title })));
+
+const LANG_BADGE = { IT: { label: "ITA", color: "#16A34A" }, CA: { label: "CAT", color: "#7C3AED" } };
+const STORAGE_KEY = "missioni-virginia-facile-v1";
+
+function shuffle(arr) {
+  const a = [...arr];
+  for (let i = a.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); [a[i], a[j]] = [a[j], a[i]]; }
+  return a;
+}
+
+// ---------- COMPONENTE PRINCIPALE ----------
+function LeMissioniDiVirginia() {
+  const [currentIndex, setCurrentIndex] = useState(0);
+  const [completed, setCompleted] = useState({});
+  const [stars, setStars] = useState(0);
+  const [loaded, setLoaded] = useState(false);
+  const [showCelebration, setShowCelebration] = useState(null);
+  const [soundOn, setSoundOn] = useState(true);
+  const playSound = useSound(soundOn);
+
+  useEffect(() => {
+    (async () => {
+      try {
+        const res = await storage.get(STORAGE_KEY);
+        if (res?.value) {
+          const data = JSON.parse(res.value);
+          setCompleted(data.completed || {});
+          setStars(data.stars || 0);
+          setCurrentIndex(data.currentIndex || 0);
+        }
+      } catch (e) {}
+      setLoaded(true);
+    })();
+  }, []);
+
+  const saveProgress = useCallback(async (newCompleted, newStars, newIndex) => {
+    try { await storage.set(STORAGE_KEY, JSON.stringify({ completed: newCompleted, stars: newStars, currentIndex: newIndex })); }
+    catch (e) {}
+  }, []);
+
+  const currentExercise = FLAT_EXERCISES[currentIndex];
+  const totalDone = Object.keys(completed).length;
+  const currentMissionIndex = MISSIONS.findIndex((m) => m.id === currentExercise?.missionId);
+
+  const handleExerciseComplete = (earnedStar) => {
+    const exId = currentExercise.id;
+    const newCompleted = { ...completed, [exId]: true };
+    const newStars = earnedStar ? stars + 1 : stars;
+    setCompleted(newCompleted);
+    setStars(newStars);
+
+    const missionExercises = MISSIONS[currentMissionIndex].exercises;
+    const missionJustFinished = missionExercises.every((e) => newCompleted[e.id]);
+
+    if (missionJustFinished) {
+      playSound(Sound.missionDone);
+      setShowCelebration("mission");
+    } else {
+      playSound(Sound.exerciseDone);
+      setShowCelebration("exercise");
+    }
+
+    setTimeout(() => {
+      setShowCelebration(null);
+      const nextIndex = Math.min(currentIndex + 1, FLAT_EXERCISES.length - 1);
+      setCurrentIndex(nextIndex);
+      saveProgress(newCompleted, newStars, nextIndex);
+    }, missionJustFinished ? 2600 : 1200);
+  };
+
+  const goToIndex = (idx) => { setCurrentIndex(idx); saveProgress(completed, stars, idx); };
+  const resetProgress = async () => { setCompleted({}); setStars(0); setCurrentIndex(0); await saveProgress({}, 0, 0); };
+
+  const isLastExercise = currentIndex === FLAT_EXERCISES.length - 1;
+  const allDone = totalDone === FLAT_EXERCISES.length;
+  const missionsCompletedCount = MISSIONS.filter((m) => m.exercises.every((e) => completed[e.id])).length;
+
+  if (!loaded) {
+    return (
+      <div style={styles.loadingScreen}>
+        <FontLoader />
+        <div style={styles.loadingSpinner}>🦄</div>
+        <p style={{ fontFamily: "Quicksand, sans-serif", color: "#7C3AED", fontWeight: 700 }}>Preparazione missioni...</p>
+      </div>
+    );
+  }
+
+  if (allDone) {
+    return (
+      <div style={styles.app}>
+        <FontLoader />
+        <FinalScreen stars={stars} missionsCount={MISSIONS.length} onReset={resetProgress} />
+      </div>
+    );
+  }
+
+  return (
+    <div style={styles.app}>
+      <FontLoader />
+      <p style={styles.appTitle}>🦄 Le Missioni di Virginia 🦄</p>
+      <TopBar
+        stars={stars}
+        missionsDone={missionsCompletedCount}
+        totalMissions={MISSIONS.length}
+        totalDone={totalDone}
+        totalExercises={FLAT_EXERCISES.length}
+        soundOn={soundOn}
+        onToggleSound={() => setSoundOn((s) => !s)}
+      />
+      <MissionStrip
+        missions={MISSIONS}
+        completed={completed}
+        currentMissionIndex={currentMissionIndex}
+      />
+      <ExerciseStage
+        key={currentExercise.id}
+        exercise={currentExercise}
+        missionTitle={currentExercise.missionTitle}
+        isLast={isLastExercise}
+        onComplete={handleExerciseComplete}
+        playSound={playSound}
+      />
+      {showCelebration === "exercise" && <BurstCelebration />}
+      {showCelebration === "mission" && <MissionCelebration missionTitle={currentExercise.missionTitle} />}
+      <button onClick={resetProgress} style={styles.resetButton}>Ricomincia le missioni</button>
+    </div>
+  );
+}
+
+function TopBar({ stars, missionsDone, totalMissions, totalDone, totalExercises, soundOn, onToggleSound }) {
+  return (
+    <div style={styles.topBar}>
+      <div style={styles.topBarRow}>
+        <div style={styles.avatarRow}>
+          <div style={styles.avatarCircle}>🦄</div>
+          <div>
+            <p style={styles.greetName}>Virginia</p>
+            <p style={styles.greetSub}>{missionsDone} / {totalMissions} missioni</p>
+          </div>
+        </div>
+        <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+          <button onClick={onToggleSound} style={styles.soundButton}>{soundOn ? "🔊" : "🔇"}</button>
+          <div style={styles.starsPill}><span style={{ fontSize: 16 }}>⭐</span><span style={styles.starsPillNum}>{stars}</span></div>
+        </div>
+      </div>
+      <div style={styles.levelBarOuter}><div style={{ ...styles.levelBarInner, width: `${(totalDone / totalExercises) * 100}%` }} /></div>
+    </div>
+  );
+}
+
+function MissionStrip({ missions, completed, currentMissionIndex }) {
+  return (
+    <div style={styles.missionStripOuter}>
+      <div style={styles.missionStripInner}>
+        {missions.map((m, idx) => {
+          const isDone = m.exercises.every((e) => completed[e.id]);
+          const isCurrent = idx === currentMissionIndex;
+          const doneCount = m.exercises.filter((e) => completed[e.id]).length;
+          return (
+            <div key={m.id} style={{
+              ...styles.missionChip,
+              background: isDone ? "#FBBF24" : isCurrent ? "#7C3AED" : "#E9E4F5",
+              color: isDone || isCurrent ? "white" : "#B9AEDC",
+              transform: isCurrent ? "scale(1.08)" : "scale(1)",
+            }}>
+              <span style={{ fontSize: 12, fontWeight: 800 }}>{isDone ? "🏆" : `${doneCount}/4`}</span>
+              <span style={{ fontSize: 10, fontWeight: 700 }}>M{idx + 1}</span>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+function ExerciseStage({ exercise, missionTitle, isLast, onComplete, playSound }) {
+  return (
+    <div style={styles.stage}>
+      <div style={styles.stageBanner}>
+        <span style={styles.stageBannerTitle}>{missionTitle}</span>
+      </div>
+      <div style={styles.stageCard}>
+        {exercise.type === "calc" && <CalcExercise exercise={exercise} onComplete={onComplete} playSound={playSound} />}
+        {exercise.type === "read" && <ReadExercise exercise={exercise} onComplete={onComplete} playSound={playSound} />}
+        {exercise.type === "write" && <WriteExercise exercise={exercise} onComplete={onComplete} playSound={playSound} />}
+      </div>
+      {isLast && <p style={styles.lastNote}>🎉 Ultima missione!</p>}
+    </div>
+  );
+}
+
+function CalcExercise({ exercise, onComplete, playSound }) {
+  const [selected, setSelected] = useState(null);
+  const [result, setResult] = useState(null);
+  const symbol = exercise.opType === "add" ? "+" : "−";
+  const choose = (idx) => {
+    if (result === "correct") return;
+    setSelected(idx);
+    const correct = idx === exercise.answer;
+    setResult(correct ? "correct" : "wrong");
+    if (correct) { playSound(Sound.correct); onComplete(true); } else playSound(Sound.wrong);
+  };
+  return (
+    <>
+      <p style={styles.eyebrow}>{exercise.opType === "add" ? "Addizione" : "Sottrazione"} — scrivi il risultato in lettere</p>
+      <div style={styles.calcDisplay}>
+        <span style={styles.calcNum}>{exercise.a}</span>
+        <span style={styles.calcSymbol}>{symbol}</span>
+        <span style={styles.calcNum}>{exercise.b}</span>
+        <span style={styles.calcSymbol}>=</span>
+        <span style={styles.calcQuestion}>?</span>
+      </div>
+      <div style={styles.optionsColumn}>
+        {exercise.options.map((opt, idx) => (
+          <button key={idx} onClick={() => choose(idx)} style={{ ...styles.optionButton, ...(selected === idx && result === "correct" ? styles.optionCorrect : {}), ...(selected === idx && result === "wrong" ? styles.optionWrong : {}) }}>{opt}</button>
+        ))}
+      </div>
+      <FeedbackLine result={result} />
+    </>
+  );
+}
+
+function ReadExercise({ exercise, onComplete, playSound }) {
+  const [done, setDone] = useState(false);
+  const badge = LANG_BADGE[exercise.lang];
+  const finish = () => { if (done) return; setDone(true); playSound(Sound.correct); onComplete(true); };
+  return (
+    <>
+      <p style={styles.eyebrow}>Leggi ad alta voce <span style={{ ...styles.langBadgeInline, background: badge.color }}>{badge.label}</span></p>
+      <span style={styles.sceneEmojiBig}>{exercise.emoji}</span>
+      <p style={styles.readSentence}>{exercise.text}</p>
+      {!done ? (
+        <button onClick={finish} style={styles.finishButton}>L'ho letta! ✓</button>
+      ) : (
+        <p style={styles.doneLabel}>✓ Bravissima!</p>
+      )}
+    </>
+  );
+}
+
+function WriteExercise({ exercise, onComplete, playSound }) {
+  const canvasRef = useRef(null);
+  const isDrawing = useRef(false);
+  const lastPos = useRef({ x: 0, y: 0 });
+  const [hasDrawn, setHasDrawn] = useState(false);
+  const [done, setDone] = useState(false);
+  const [showHint, setShowHint] = useState(false);
+  const badge = LANG_BADGE[exercise.lang];
+
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const ctx = canvas.getContext("2d");
+    const ratio = window.devicePixelRatio || 1;
+    canvas.width = canvas.clientWidth * ratio;
+    canvas.height = canvas.clientHeight * ratio;
+    ctx.scale(ratio, ratio);
+  }, []);
+
+  const getPos = (e) => {
+    const canvas = canvasRef.current;
+    const rect = canvas.getBoundingClientRect();
+    const clientX = e.touches ? e.touches[0].clientX : e.clientX;
+    const clientY = e.touches ? e.touches[0].clientY : e.clientY;
+    return { x: clientX - rect.left, y: clientY - rect.top };
+  };
+  const startDraw = (e) => { isDrawing.current = true; lastPos.current = getPos(e); setHasDrawn(true); };
+  const draw = (e) => {
+    if (!isDrawing.current) return;
+    e.preventDefault();
+    const ctx = canvasRef.current.getContext("2d");
+    const pos = getPos(e);
+    ctx.strokeStyle = "#1E1B2E"; ctx.lineWidth = 2.5; ctx.lineCap = "round"; ctx.lineJoin = "round";
+    ctx.beginPath(); ctx.moveTo(lastPos.current.x, lastPos.current.y); ctx.lineTo(pos.x, pos.y); ctx.stroke();
+    lastPos.current = pos;
+  };
+  const stopDraw = () => { isDrawing.current = false; };
+  const clearCanvas = () => { const canvas = canvasRef.current; canvas.getContext("2d").clearRect(0, 0, canvas.width, canvas.height); setHasDrawn(false); };
+  const finish = () => { if (done) return; setDone(true); playSound(Sound.correct); onComplete(true); };
+
+  return (
+    <>
+      <p style={styles.eyebrow}>Scrivi <span style={{ ...styles.langBadgeInline, background: badge.color }}>{badge.label}</span></p>
+      <span style={styles.sceneEmojiBig}>{exercise.emoji}</span>
+      <p style={styles.promptText}>{exercise.prompt}</p>
+      <div style={styles.canvasWrap}>
+        <canvas ref={canvasRef} style={styles.canvas} onMouseDown={startDraw} onMouseMove={draw} onMouseUp={stopDraw} onMouseLeave={stopDraw} onTouchStart={startDraw} onTouchMove={draw} onTouchEnd={stopDraw} />
+      </div>
+      <div style={{ display: "flex", gap: 8, marginBottom: 10 }}>
+        <button onClick={clearCanvas} style={styles.clearButton}>🧹 Pulisci</button>
+        <button onClick={() => setShowHint((s) => !s)} style={styles.hintButton}>💡 {showHint ? "Nascondi" : "Aiuto"}</button>
+      </div>
+      {showHint && <p style={styles.hintLine}>{exercise.hint}</p>}
+      <p style={styles.parentNote}>Lo rivede un adulto — quando hai finito, premi "Ho finito".</p>
+      {!done ? (
+        <button onClick={finish} disabled={!hasDrawn} style={{ ...styles.finishButton, opacity: hasDrawn ? 1 : 0.5 }}>Ho finito ✓</button>
+      ) : (
+        <p style={styles.doneLabel}>✓ Fatto! Bel lavoro.</p>
+      )}
+    </>
+  );
+}
+
+function FeedbackLine({ result }) {
+  if (!result) return null;
+  return (<p style={result === "correct" ? styles.feedbackCorrect : styles.feedbackWrong}>{result === "correct" ? "🎉 Esatto! Hai guadagnato una stella." : "Riprova 💪"}</p>);
+}
+
+function BurstCelebration() {
+  const particles = Array.from({ length: 12 }, (_, i) => i);
+  return (
+    <div style={styles.celebrationOverlay}>
+      {particles.map((i) => {
+        const angle = (i / particles.length) * 2 * Math.PI;
+        const dist = 80 + Math.random() * 50;
+        return (<span key={i} style={{ ...styles.particle, transform: `translate(${Math.cos(angle) * dist}px, ${Math.sin(angle) * dist}px)` }}>⭐</span>);
+      })}
+    </div>
+  );
+}
+
+function MissionCelebration({ missionTitle }) {
+  const particles = Array.from({ length: 28 }, (_, i) => i);
+  return (
+    <div style={styles.celebrationOverlay}>
+      {particles.map((i) => {
+        const angle = (i / particles.length) * 2 * Math.PI;
+        const dist = 130 + Math.random() * 100;
+        const emoji = ["🏆", "🦄", "✨", "⭐", "🌈"][i % 5];
+        return (<span key={i} style={{ ...styles.particleBig, transform: `translate(${Math.cos(angle) * dist}px, ${Math.sin(angle) * dist}px)` }}>{emoji}</span>);
+      })}
+      <div style={styles.missionBanner}>
+        <p style={styles.missionBannerTitle}>{missionTitle} completata!</p>
+        <p style={styles.missionBannerSub}>🏆 Premio sbloccato 🏆</p>
+      </div>
+    </div>
+  );
+}
+
+function FinalScreen({ stars, missionsCount, onReset }) {
+  return (
+    <div style={styles.finalScreen}>
+      <div style={styles.finalEmoji}>🦄🏆✨</div>
+      <h1 style={styles.finalTitle}>Tutte le {missionsCount} missioni completate!</h1>
+      <p style={styles.finalSub}>Bravissima Virginia! Sei pronta per le missioni più grandi.</p>
+      <div style={styles.finalStarsPill}>
+        <span style={{ fontSize: 28 }}>⭐</span>
+        <span style={styles.finalStarsNum}>{stars}</span>
+        <span style={styles.finalStarsLabel}>stelle raccolte</span>
+      </div>
+      <button onClick={onReset} style={styles.finalResetButton}>Ricomincia da capo</button>
+    </div>
+  );
+}
+
+function FontLoader() {
+  return <style>{`@import url('https://fonts.googleapis.com/css2?family=Baloo+2:wght@500;700;800&family=Quicksand:wght@500;600;700&display=swap');`}</style>;
+}
+
+const styles = {
+  app: { fontFamily: "Quicksand, sans-serif", minHeight: "100vh", background: "linear-gradient(180deg, #FDF4FF, #F5F3FF)", position: "relative", paddingBottom: 30 },
+  loadingScreen: { minHeight: "100vh", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", background: "#FDF4FF", gap: 12 },
+  loadingSpinner: { fontSize: 48 },
+  appTitle: { fontFamily: "Baloo 2, sans-serif", fontSize: 19, color: "#7C3AED", textAlign: "center", margin: "14px 0 0", fontWeight: 800 },
+  topBar: { padding: "10px 18px 6px", maxWidth: 480, margin: "0 auto" },
+  topBarRow: { display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 },
+  avatarRow: { display: "flex", alignItems: "center", gap: 10 },
+  avatarCircle: { width: 44, height: 44, borderRadius: "50%", background: "linear-gradient(135deg, #FF9AD5, #C084FC, #93C5FD)", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 24, boxShadow: "0 4px 10px rgba(196,132,252,0.45)" },
+  greetName: { margin: 0, fontFamily: "Baloo 2, sans-serif", fontWeight: 700, fontSize: 16, color: "#1E1B2E" },
+  greetSub: { margin: 0, fontSize: 12, color: "#9D7BC4", fontWeight: 600 },
+  soundButton: { background: "white", border: "2px solid #EDE9FE", borderRadius: 12, width: 38, height: 38, fontSize: 16, cursor: "pointer" },
+  starsPill: { display: "flex", alignItems: "center", gap: 5, background: "linear-gradient(135deg, #FEF3C7, #FDE68A)", border: "2px solid #FBBF24", borderRadius: 18, padding: "5px 12px" },
+  starsPillNum: { fontFamily: "Baloo 2, sans-serif", fontWeight: 800, color: "#92660D", fontSize: 14 },
+  levelBarOuter: { height: 10, borderRadius: 6, background: "#EDE9FE", overflow: "hidden" },
+  levelBarInner: { height: "100%", background: "linear-gradient(90deg, #FF9AD5, #C084FC, #93C5FD, #6EE7B7, #FDE68A)", borderRadius: 6, transition: "width 0.5s ease" },
+  missionStripOuter: { padding: "8px 18px 14px", maxWidth: 480, margin: "0 auto", overflowX: "auto" },
+  missionStripInner: { display: "flex", gap: 8 },
+  missionChip: { display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", borderRadius: 14, padding: "8px 14px", flexShrink: 0, minWidth: 52, transition: "transform 0.2s ease" },
+  stage: { padding: "4px 18px 0", maxWidth: 480, margin: "0 auto" },
+  stageBanner: { borderRadius: 18, padding: "12px 16px", background: "linear-gradient(135deg, #7C3AED, #C084FC)", marginBottom: 14, boxShadow: "0 4px 14px rgba(124,58,237,0.25)" },
+  stageBannerTitle: { fontFamily: "Baloo 2, sans-serif", fontSize: 16, color: "white", textShadow: "0 1px 3px rgba(0,0,0,0.15)" },
+  stageCard: { background: "white", borderRadius: 22, padding: "22px 18px", boxShadow: "0 10px 28px rgba(124,58,237,0.14)", border: "2px solid #EDE9FE", marginBottom: 16 },
+  eyebrow: { fontSize: 13, fontWeight: 700, color: "#9D7BC4", marginBottom: 8, display: "flex", alignItems: "center", gap: 8 },
+  langBadgeInline: { fontSize: 10, fontWeight: 800, color: "white", borderRadius: 7, padding: "2px 7px" },
+  promptText: { fontSize: 18, fontWeight: 700, color: "#1E1B2E", lineHeight: 1.4, marginBottom: 14, textAlign: "center" },
+  sceneEmojiBig: { fontSize: 50, textAlign: "center", display: "block", marginBottom: 12 },
+  readSentence: { fontSize: 21, fontWeight: 700, color: "#1E1B2E", lineHeight: 1.5, textAlign: "center", marginBottom: 18 },
+  calcDisplay: { display: "flex", alignItems: "center", justifyContent: "center", gap: 12, marginBottom: 20 },
+  calcNum: { fontFamily: "Baloo 2, sans-serif", fontSize: 38, fontWeight: 800, color: "#1E1B2E", background: "#FAF5FF", borderRadius: 14, padding: "8px 16px", border: "2px solid #EDE9FE" },
+  calcSymbol: { fontFamily: "Baloo 2, sans-serif", fontSize: 30, fontWeight: 800, color: "#7C3AED" },
+  calcQuestion: { fontFamily: "Baloo 2, sans-serif", fontSize: 38, fontWeight: 800, color: "#FBBF24", background: "#FFFBEB", borderRadius: 14, padding: "8px 20px", border: "2px solid #FDE68A" },
+  optionsColumn: { display: "flex", flexDirection: "column", gap: 9, marginBottom: 10 },
+  optionButton: { textAlign: "center", padding: "14px 15px", borderRadius: 16, border: "2px solid #EDE9FE", background: "#FAF5FF", fontSize: 18, fontWeight: 700, color: "#1E1B2E", cursor: "pointer", textTransform: "capitalize" },
+  optionCorrect: { background: "#DCFCE7", borderColor: "#16A34A", color: "#15803D" },
+  optionWrong: { background: "#FEE2E2", borderColor: "#DC2626", color: "#B91C1C" },
+  canvasWrap: { border: "2px solid #EDE9FE", borderRadius: 16, overflow: "hidden", marginBottom: 10, background: "#FFFDF9" },
+  canvas: { width: "100%", height: 160, display: "block", touchAction: "none" },
+  clearButton: { background: "#FAF5FF", border: "2px solid #EDE9FE", borderRadius: 12, padding: "8px 14px", fontSize: 12, fontWeight: 700, color: "#9D7BC4", cursor: "pointer" },
+  hintButton: { background: "#FFFBEB", border: "2px solid #FDE68A", borderRadius: 12, padding: "8px 14px", fontSize: 12, fontWeight: 700, color: "#92660D", cursor: "pointer" },
+  hintLine: { fontSize: 16, color: "#7C3AED", fontWeight: 700, marginBottom: 10, textAlign: "center", background: "#FAF5FF", borderRadius: 10, padding: "8px" },
+  parentNote: { fontSize: 12, color: "#C4B5FD", marginBottom: 10, fontStyle: "italic" },
+  finishButton: { width: "100%", background: "#16A34A", color: "white", border: "none", borderRadius: 16, padding: "13px", fontSize: 15, fontWeight: 800, cursor: "pointer" },
+  doneLabel: { color: "#15803D", fontWeight: 800, fontSize: 15, textAlign: "center" },
+  feedbackCorrect: { color: "#15803D", fontWeight: 800, fontSize: 15, marginTop: 6, textAlign: "center" },
+  feedbackWrong: { color: "#B91C1C", fontWeight: 700, fontSize: 14, marginTop: 6, textAlign: "center" },
+  lastNote: { textAlign: "center", color: "#7C3AED", fontWeight: 700, fontSize: 14, marginBottom: 10 },
+  resetButton: { display: "block", margin: "6px auto 0", background: "none", border: "none", color: "#C4B5FD", fontSize: 12, textDecoration: "underline", cursor: "pointer" },
+  celebrationOverlay: { position: "fixed", inset: 0, display: "flex", alignItems: "center", justifyContent: "center", pointerEvents: "none", zIndex: 50, overflow: "hidden" },
+  particle: { position: "absolute", fontSize: 26 },
+  particleBig: { position: "absolute", fontSize: 32 },
+  missionBanner: { background: "linear-gradient(135deg, #FBBF24, #FF9AD5, #C084FC)", borderRadius: 24, padding: "26px 30px", textAlign: "center", boxShadow: "0 12px 32px rgba(196,132,252,0.5)" },
+  missionBannerTitle: { fontFamily: "Baloo 2, sans-serif", fontSize: 22, color: "white", margin: 0, textShadow: "0 2px 6px rgba(0,0,0,0.2)" },
+  missionBannerSub: { color: "white", fontWeight: 700, margin: "6px 0 0", fontSize: 15 },
+  finalScreen: { minHeight: "100vh", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", padding: "40px 24px", textAlign: "center" },
+  finalEmoji: { fontSize: 56, marginBottom: 14 },
+  finalTitle: { fontFamily: "Baloo 2, sans-serif", fontSize: 22, color: "#1E1B2E", margin: "0 0 8px" },
+  finalSub: { color: "#9D7BC4", fontWeight: 600, fontSize: 15, marginBottom: 24 },
+  finalStarsPill: { display: "flex", alignItems: "center", gap: 8, background: "linear-gradient(135deg, #FEF3C7, #FDE68A)", border: "2px solid #FBBF24", borderRadius: 22, padding: "12px 22px", marginBottom: 28 },
+  finalStarsNum: { fontFamily: "Baloo 2, sans-serif", fontWeight: 800, color: "#92660D", fontSize: 22 },
+  finalStarsLabel: { color: "#92660D", fontWeight: 700, fontSize: 14 },
+  finalResetButton: { background: "#7C3AED", color: "white", border: "none", borderRadius: 16, padding: "12px 24px", fontWeight: 700, fontSize: 14, cursor: "pointer" },
+};
+
+const root = ReactDOM.createRoot(document.getElementById("root"));
+root.render(<LeMissioniDiVirginia />);
+</script>
+</body>
+</html>
