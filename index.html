@@ -275,6 +275,8 @@ function LeMissioniDiVirginia() {
 
   const isLastExercise = currentIndex === FLAT_EXERCISES.length - 1;
   const allDone = totalDone === FLAT_EXERCISES.length;
+  const isLastExercise = currentIndex === FLAT_EXERCISES.length - 1;
+  const allDone = totalDone === FLAT_EXERCISES.length;
   const missionsCompletedCount = MISSIONS.filter((m) => m.exercises.every((e) => completed[e.id])).length;
 
   if (!loaded) {
@@ -613,7 +615,7 @@ function MissionCelebration({ missionTitle }) {
   );
 }
 
-function FinalScreen({ stars, missionsCount, onReset }) {
+function FinalScreen({ stars, missionsCount, onReset, onParent }) {
   return (
     <div style={styles.finalScreen}>
       <div style={styles.finalEmoji}>🦄🏆✨</div>
