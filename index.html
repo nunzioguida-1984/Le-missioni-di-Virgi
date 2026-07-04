@@ -200,7 +200,7 @@ function buildMissions() {
 const MISSIONS = buildMissions();
 const FLAT_EXERCISES = MISSIONS.flatMap((m) => m.exercises.map((e) => ({ ...e, missionId: m.id, missionTitle: m.title })));
 
-const LANG_BADGE = { IT: { label: "ITA", color: "#16A34A" }, CA: { label: "CAT", color: "#7C3AED" } };
+const LANG_BADGE = { IT: { label: "ITA", color: "#16A34A", flag: "🇮🇹" }, CA: { label: "CAT", color: "#7C3AED", flag: "🏴󠁥󠁳󠁣󠁴󠁿" } };
 const STORAGE_KEY = "missioni-virginia-facile-v1";
 const ERRORS_KEY = "missioni-virginia-errori-v1";
 
@@ -470,7 +470,7 @@ function ReadExercise({ exercise, onComplete, onError, playSound }) {
   const markWrong = () => { playSound(Sound.wrong); onError(); };
   return (
     <>
-      <p style={styles.eyebrow}>Leggi ad alta voce <span style={{ ...styles.langBadgeInline, background: badge.color }}>{badge.label}</span></p>
+      <p style={styles.eyebrow}>LEGGI AD ALTA VOCE {badge.flag} <span style={{ ...styles.langBadgeInline, background: badge.color }}>{badge.label}</span></p>
       <span style={styles.sceneEmojiBig}>{exercise.emoji}</span>
       <p style={styles.readSentence}>{exercise.text}</p>
       <p style={styles.parentNote}>Un adulto ascolta: l'ha letta bene?</p>
@@ -527,7 +527,7 @@ function WriteExercise({ exercise, onComplete, onError, playSound }) {
 
   return (
     <>
-      <p style={styles.eyebrow}>Copia la frase <span style={{ ...styles.langBadgeInline, background: badge.color }}>{badge.label}</span></p>
+      <p style={styles.eyebrow}>COPIA LA FRASE {badge.flag} <span style={{ ...styles.langBadgeInline, background: badge.color }}>{badge.label}</span></p>
       <span style={styles.sceneEmojiBig}>{exercise.emoji}</span>
       <p style={styles.readSentence}>{exercise.sentence}</p>
       <div style={styles.canvasWrapBig}>
