@@ -10,6 +10,7 @@
 <script crossorigin src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
 <script crossorigin src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.5/babel.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.20.0/dist/tf.min.js"></script>
 <style>
   @import url('https://fonts.googleapis.com/css2?family=Baloo+2:wght@500;700;800&family=Quicksand:wght@500;600;700&display=swap');
   * { box-sizing: border-box; }
@@ -75,6 +76,245 @@ const storage = {
     catch (e) { return null; }
   },
 };
+
+/* ============================================================
+   RICONOSCIMENTO CIFRE — validazione automatica esercizi di calcolo
+   CNN addestrata nel browser su MNIST (client-side, gratuito, nessun
+   dato inviato a server esterni). Include copie sintetiche del "7"
+   con trattino orizzontale (stile europeo), assente in MNIST originale.
+   Modello cachato in IndexedDB: solo la prima apertura richiede
+   addestramento (~40-50 secondi), le successive sono istantanee.
+   ============================================================ */
+const MNIST_IMAGES_SPRITE_PATH = 'https://storage.googleapis.com/learnjs-data/model-builder/mnist_images.png';
+const MNIST_LABELS_PATH = 'https://storage.googleapis.com/learnjs-data/model-builder/mnist_labels_uint8';
+const DIGIT_IMAGE_SIZE = 784;
+const DIGIT_NUM_CLASSES = 10;
+const DIGIT_TRAIN_ELEMENTS = 12000;
+const DIGIT_MODEL_KEY = 'indexeddb://virginia-digit-model-v4';
+
+async function loadMnistTrainingData() {
+  const resp = await fetch(MNIST_IMAGES_SPRITE_PATH);
+  if (!resp.ok) throw new Error('Download immagini fallito: HTTP ' + resp.status);
+  const blob = await resp.blob();
+  const bitmap = await createImageBitmap(blob);
+
+  const canvas = document.createElement('canvas');
+  const ctx = canvas.getContext('2d');
+  canvas.width = bitmap.width;
+  canvas.height = DIGIT_TRAIN_ELEMENTS;
+  ctx.drawImage(bitmap, 0, 0, bitmap.width, DIGIT_TRAIN_ELEMENTS, 0, 0, bitmap.width, DIGIT_TRAIN_ELEMENTS);
+  const imageData = ctx.getImageData(0, 0, bitmap.width, DIGIT_TRAIN_ELEMENTS);
+
+  const floatData = new Float32Array(DIGIT_TRAIN_ELEMENTS * DIGIT_IMAGE_SIZE);
+  for (let j = 0; j < floatData.length; j++) floatData[j] = imageData.data[j * 4] / 255;
+
+  const labelsResp = await fetch(MNIST_LABELS_PATH);
+  if (!labelsResp.ok) throw new Error('Download etichette fallito: HTTP ' + labelsResp.status);
+  const labelsBuffer = await labelsResp.arrayBuffer();
+  const labelsFull = new Uint8Array(labelsBuffer);
+  const labels = labelsFull.slice(0, DIGIT_TRAIN_ELEMENTS * DIGIT_NUM_CLASSES);
+
+  // Augmentation: copie dei "7" con trattino orizzontale stile europeo
+  const sevenIndices = [];
+  for (let i = 0; i < DIGIT_TRAIN_ELEMENTS; i++) {
+    if (labels[i * DIGIT_NUM_CLASSES + 7] === 1) sevenIndices.push(i);
+  }
+  const augCount = sevenIndices.length;
+  const augFloatData = new Float32Array(augCount * DIGIT_IMAGE_SIZE);
+  const augLabels = new Float32Array(augCount * DIGIT_NUM_CLASSES);
+  sevenIndices.forEach((srcIdx, k) => {
+    const srcOffset = srcIdx * DIGIT_IMAGE_SIZE;
+    const dstOffset = k * DIGIT_IMAGE_SIZE;
+    augFloatData.set(floatData.subarray(srcOffset, srcOffset + DIGIT_IMAGE_SIZE), dstOffset);
+    const row = 16;
+    for (let col = 5; col <= 22; col++) {
+      augFloatData[dstOffset + row * 28 + col] = 1.0;
+      augFloatData[dstOffset + (row + 1) * 28 + col] = 1.0;
+    }
+    augLabels[k * DIGIT_NUM_CLASSES + 7] = 1;
+  });
+
+  const totalElements = DIGIT_TRAIN_ELEMENTS + augCount;
+  const combinedFloatData = new Float32Array(totalElements * DIGIT_IMAGE_SIZE);
+  combinedFloatData.set(floatData, 0);
+  combinedFloatData.set(augFloatData, DIGIT_TRAIN_ELEMENTS * DIGIT_IMAGE_SIZE);
+  const combinedLabels = new Float32Array(totalElements * DIGIT_NUM_CLASSES);
+  combinedLabels.set(labels, 0);
+  combinedLabels.set(augLabels, DIGIT_TRAIN_ELEMENTS * DIGIT_NUM_CLASSES);
+
+  const xs = tf.tensor4d(combinedFloatData, [totalElements, 28, 28, 1]);
+  const ys = tf.tensor2d(combinedLabels, [totalElements, DIGIT_NUM_CLASSES]);
+  return { xs, ys };
+}
+
+function buildDigitModel() {
+  const model = tf.sequential();
+  model.add(tf.layers.conv2d({ inputShape: [28, 28, 1], kernelSize: 5, filters: 8, strides: 1, activation: 'relu', kernelInitializer: 'varianceScaling' }));
+  model.add(tf.layers.maxPooling2d({ poolSize: [2, 2], strides: [2, 2] }));
+  model.add(tf.layers.conv2d({ kernelSize: 5, filters: 16, strides: 1, activation: 'relu', kernelInitializer: 'varianceScaling' }));
+  model.add(tf.layers.maxPooling2d({ poolSize: [2, 2], strides: [2, 2] }));
+  model.add(tf.layers.flatten());
+  model.add(tf.layers.dense({ units: 10, kernelInitializer: 'varianceScaling', activation: 'softmax' }));
+  model.compile({ optimizer: tf.train.adam(), loss: 'categoricalCrossentropy', metrics: ['accuracy'] });
+  return model;
+}
+
+// Ritaglia la cifra scritta a mano, mantiene le proporzioni (lato lungo = 20px)
+// e la centra in 28x28 come lo standard MNIST. Inverte i colori.
+function digitCanvasToTensor(canvas) {
+  const ctx = canvas.getContext('2d');
+  const { width, height } = canvas;
+  const imgData = ctx.getImageData(0, 0, width, height);
+  let minX = width, maxX = 0, minY = height, maxY = 0;
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      const idx = (y * width + x) * 4;
+      if (imgData.data[idx + 3] > 0 && imgData.data[idx] < 200) {
+        if (x < minX) minX = x;
+        if (x > maxX) maxX = x;
+        if (y < minY) minY = y;
+        if (y > maxY) maxY = y;
+      }
+    }
+  }
+  if (maxX <= minX || maxY <= minY) return null;
+
+  const cropW = maxX - minX + 1;
+  const cropH = maxY - minY + 1;
+  const TARGET = 20;
+  const scale = TARGET / Math.max(cropW, cropH);
+  const destW = Math.max(1, Math.round(cropW * scale));
+  const destH = Math.max(1, Math.round(cropH * scale));
+
+  const small = document.createElement('canvas');
+  small.width = 28;
+  small.height = 28;
+  const smctx = small.getContext('2d');
+  smctx.fillStyle = 'white';
+  smctx.fillRect(0, 0, 28, 28);
+  const offsetX = Math.round((28 - destW) / 2);
+  const offsetY = Math.round((28 - destH) / 2);
+  smctx.drawImage(canvas, minX, minY, cropW, cropH, offsetX, offsetY, destW, destH);
+
+  const data = smctx.getImageData(0, 0, 28, 28).data;
+  const floatData = new Float32Array(28 * 28);
+  for (let i = 0; i < 28 * 28; i++) floatData[i] = 1 - data[i * 4] / 255;
+  return tf.tensor4d(floatData, [1, 28, 28, 1]);
+}
+
+function useDigitModel() {
+  const [model, setModel] = useState(null);
+  const [status, setStatus] = useState('init'); // init | training | ready | error
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const loaded = await tf.loadLayersModel(DIGIT_MODEL_KEY);
+        if (cancelled) return;
+        setModel(loaded);
+        setStatus('ready');
+        return;
+      } catch (e) { /* nessun modello in cache, addestro */ }
+      try {
+        setStatus('training');
+        const { xs, ys } = await loadMnistTrainingData();
+        const m = buildDigitModel();
+        await m.fit(xs, ys, { batchSize: 64, epochs: 12, validationSplit: 0.1 });
+        xs.dispose(); ys.dispose();
+        if (cancelled) return;
+        await m.save(DIGIT_MODEL_KEY);
+        setModel(m);
+        setStatus('ready');
+      } catch (e) {
+        console.error('Errore addestramento modello cifre:', e);
+        if (!cancelled) setStatus('error');
+      }
+    })();
+    return () => { cancelled = true; };
+  }, []);
+  return { model, status };
+}
+
+function recognizeDigit(model, canvas) {
+  const tensor = digitCanvasToTensor(canvas);
+  if (!tensor) return null;
+  const pred = model.predict(tensor);
+  const data = pred.dataSync();
+  tensor.dispose();
+  pred.dispose();
+  let best = 0;
+  for (let i = 1; i < 10; i++) if (data[i] > data[best]) best = i;
+  return { digit: best, confidence: data[best] };
+}
+
+// Piccolo canvas per una singola cifra, usato nell'esercizio di calcolo
+function SingleDigitCanvas({ onStrokeEnd, size = 90 }) {
+  const canvasRef = useRef(null);
+  const drawing = useRef(false);
+  const hasDrawn = useRef(false);
+
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    const ctx = canvas.getContext('2d');
+    ctx.fillStyle = 'white';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    ctx.lineWidth = 9;
+    ctx.lineCap = 'round';
+    ctx.lineJoin = 'round';
+    ctx.strokeStyle = '#1E1B2E';
+  }, []);
+
+  const getPos = (e, canvas) => {
+    const rect = canvas.getBoundingClientRect();
+    const clientX = e.touches ? e.touches[0].clientX : e.clientX;
+    const clientY = e.touches ? e.touches[0].clientY : e.clientY;
+    return { x: (clientX - rect.left) * (canvas.width / rect.width), y: (clientY - rect.top) * (canvas.height / rect.height) };
+  };
+  const start = (e) => {
+    e.preventDefault();
+    drawing.current = true;
+    hasDrawn.current = true;
+    const canvas = canvasRef.current;
+    const ctx = canvas.getContext('2d');
+    const pos = getPos(e, canvas);
+    ctx.beginPath();
+    ctx.moveTo(pos.x, pos.y);
+  };
+  const move = (e) => {
+    if (!drawing.current) return;
+    e.preventDefault();
+    const canvas = canvasRef.current;
+    const ctx = canvas.getContext('2d');
+    const pos = getPos(e, canvas);
+    ctx.lineTo(pos.x, pos.y);
+    ctx.stroke();
+  };
+  const end = () => {
+    if (drawing.current) { drawing.current = false; onStrokeEnd(canvasRef.current); }
+  };
+  const clear = () => {
+    const canvas = canvasRef.current;
+    const ctx = canvas.getContext('2d');
+    ctx.fillStyle = 'white';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    hasDrawn.current = false;
+    onStrokeEnd(null);
+  };
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 6 }}>
+      <canvas
+        ref={canvasRef}
+        width={size}
+        height={size}
+        style={{ border: '3px solid #C4B5FD', borderRadius: 14, touchAction: 'none', background: 'white', width: size, height: size }}
+        onMouseDown={start} onMouseMove={move} onMouseUp={end} onMouseLeave={end}
+        onTouchStart={start} onTouchMove={move} onTouchEnd={end}
+      />
+      <button onClick={clear} style={{ padding: '4px 10px', borderRadius: 10, border: 'none', background: '#EDE9FE', color: '#5B21B6', fontWeight: 700, fontSize: 12, cursor: 'pointer' }}>Cancella</button>
+    </div>
+  );
+}
 
 // ---------- NUMERI IN LETTERE (IT e CA) ----------
 const NUM_IT = {0:"zero",1:"uno",2:"due",3:"tre",4:"quattro",5:"cinque",6:"sei",7:"sette",8:"otto",9:"nove",10:"dieci",11:"undici",12:"dodici",13:"tredici",14:"quattordici",15:"quindici",16:"sedici",17:"diciassette",18:"diciotto",19:"diciannove",20:"venti",21:"ventuno",22:"ventidue",23:"ventitré",24:"ventiquattro",25:"venticinque",26:"ventisei",27:"ventisette",28:"ventotto",29:"ventinove",30:"trenta",35:"trentacinque",40:"quaranta",45:"quarantacinque",50:"cinquanta"};
@@ -218,7 +458,10 @@ function LeMissioniDiVirginia() {
   const [loaded, setLoaded] = useState(false);
   const [showCelebration, setShowCelebration] = useState(null);
   const [soundOn, setSoundOn] = useState(true);
+  const [errors, setErrors] = useState([]);
+  const [showParentSection, setShowParentSection] = useState(false);
   const playSound = useSound(soundOn);
+  const { model: digitModel, status: digitModelStatus } = useDigitModel();
 
   useEffect(() => {
     (async () => {
@@ -231,6 +474,10 @@ function LeMissioniDiVirginia() {
           setCurrentIndex(data.currentIndex || 0);
         }
       } catch (e) {}
+      try {
+        const errRes = await storage.get(ERRORS_KEY);
+        if (errRes?.value) setErrors(JSON.parse(errRes.value));
+      } catch (e) {}
       setLoaded(true);
     })();
   }, []);
@@ -238,6 +485,19 @@ function LeMissioniDiVirginia() {
   const saveProgress = useCallback(async (newCompleted, newStars, newIndex) => {
     try { await storage.set(STORAGE_KEY, JSON.stringify({ completed: newCompleted, stars: newStars, currentIndex: newIndex })); }
     catch (e) {}
+  }, []);
+
+  const logError = useCallback((type, missionTitle, label) => {
+    setErrors((prev) => {
+      const next = [...prev, { type, missionTitle, label, date: new Date().toLocaleDateString('it-IT') }];
+      storage.set(ERRORS_KEY, JSON.stringify(next)).catch(() => {});
+      return next;
+    });
+  }, []);
+
+  const clearErrors = useCallback(async () => {
+    setErrors([]);
+    await storage.set(ERRORS_KEY, JSON.stringify([]));
   }, []);
 
   const currentExercise = FLAT_EXERCISES[currentIndex];
@@ -287,6 +547,15 @@ function LeMissioniDiVirginia() {
     );
   }
 
+  if (showParentSection) {
+    return (
+      <div style={styles.app}>
+        <FontLoader />
+        <ParentSection errors={errors} onBack={() => setShowParentSection(false)} onClear={clearErrors} />
+      </div>
+    );
+  }
+
   if (allDone) {
     return (
       <div style={styles.app}>
@@ -299,6 +568,18 @@ function LeMissioniDiVirginia() {
   return (
     <div style={styles.app}>
       <FontLoader />
+      <button
+        onClick={() => setShowParentSection(true)}
+        style={{ position: "fixed", top: 14, right: 14, zIndex: 40, background: "white", border: "2px solid #EDE9FE", borderRadius: 999, width: 44, height: 44, fontSize: 20, cursor: "pointer", boxShadow: "0 2px 8px rgba(124,58,237,0.15)" }}
+        aria-label="Sezione genitori"
+      >
+        👨‍👧
+        {errors.length > 0 && (
+          <span style={{ position: "absolute", top: -4, right: -4, background: "#DC2626", color: "white", borderRadius: 999, fontSize: 11, minWidth: 18, height: 18, display: "flex", alignItems: "center", justifyContent: "center", fontWeight: 800 }}>
+            {errors.length}
+          </span>
+        )}
+      </button>
       <p style={styles.appTitle}>🦄 Le Missioni di Virginia 🦄</p>
       <TopBar
         stars={stars}
@@ -320,7 +601,10 @@ function LeMissioniDiVirginia() {
         missionTitle={currentExercise.missionTitle}
         isLast={isLastExercise}
         onComplete={handleExerciseComplete}
+        onError={(label) => logError(currentExercise.type, currentExercise.missionTitle, label)}
         playSound={playSound}
+        digitModel={digitModel}
+        digitModelStatus={digitModelStatus}
       />
       {showCelebration === "exercise" && <BurstCelebration />}
       {showCelebration === "mission" && <MissionCelebration missionTitle={currentExercise.missionTitle} />}
@@ -378,61 +662,73 @@ function MissionStrip({ missions, completed, currentMissionIndex }) {
   );
 }
 
-function ExerciseStage({ exercise, missionTitle, isLast, onComplete, playSound }) {
+function ExerciseStage({ exercise, missionTitle, isLast, onComplete, onError, playSound, digitModel, digitModelStatus }) {
   return (
     <div style={styles.stage}>
       <div style={styles.stageBanner}>
         <span style={styles.stageBannerTitle}>{missionTitle}</span>
       </div>
       <div style={styles.stageCard}>
-        {exercise.type === "calc" && <CalcExercise exercise={exercise} onComplete={onComplete} playSound={playSound} />}
-        {exercise.type === "read" && <ReadExercise exercise={exercise} onComplete={onComplete} playSound={playSound} />}
-        {exercise.type === "write" && <WriteExercise exercise={exercise} onComplete={onComplete} playSound={playSound} />}
+        {exercise.type === "calc" && <CalcExercise exercise={exercise} onComplete={onComplete} onError={onError} playSound={playSound} digitModel={digitModel} digitModelStatus={digitModelStatus} />}
+        {exercise.type === "read" && <ReadExercise exercise={exercise} onComplete={onComplete} onError={onError} playSound={playSound} />}
+        {exercise.type === "write" && <WriteExercise exercise={exercise} onComplete={onComplete} onError={onError} playSound={playSound} />}
       </div>
       {isLast && <p style={styles.lastNote}>🎉 Ultima missione!</p>}
     </div>
   );
 }
 
-function CalcExercise({ exercise, onComplete, onError, playSound }) {
-  const canvasRef = useRef(null);
-  const isDrawing = useRef(false);
-  const lastPos = useRef({ x: 0, y: 0 });
-  const [hasDrawn, setHasDrawn] = useState(false);
+function CalcExercise({ exercise, onComplete, onError, playSound, digitModel, digitModelStatus }) {
   const [done, setDone] = useState(false);
+  const [digits, setDigits] = useState({}); // { 0: {digit, confidence}|null, 1: ... }
+  const [checking, setChecking] = useState(false);
+  const [feedback, setFeedback] = useState(null); // { ok: bool, recognized: number } | null
+  const [manualMode, setManualMode] = useState(false);
   const symbol = exercise.opType === "add" ? "+" : "−";
+  const numDigits = String(exercise.result).length;
+  const canvasesRef = useRef({});
 
-  useEffect(() => {
-    const canvas = canvasRef.current;
-    if (!canvas) return;
-    const ctx = canvas.getContext("2d");
-    const ratio = window.devicePixelRatio || 1;
-    canvas.width = canvas.clientWidth * ratio;
-    canvas.height = canvas.clientHeight * ratio;
-    ctx.scale(ratio, ratio);
-  }, []);
+  const handleStrokeEnd = (idx, canvas) => {
+    canvasesRef.current[idx] = canvas;
+    setDigits((d) => ({ ...d, [idx]: canvas ? "pending" : null }));
+  };
 
-  const getPos = (e) => {
-    const canvas = canvasRef.current;
-    const rect = canvas.getBoundingClientRect();
-    const clientX = e.touches ? e.touches[0].clientX : e.clientX;
-    const clientY = e.touches ? e.touches[0].clientY : e.clientY;
-    return { x: clientX - rect.left, y: clientY - rect.top };
+  const allFilled = Array.from({ length: numDigits }).every((_, i) => canvasesRef.current[i]);
+
+  const verifica = () => {
+    if (!digitModel || checking) return;
+    setChecking(true);
+    setFeedback(null);
+    let recognizedStr = "";
+    for (let i = 0; i < numDigits; i++) {
+      const canvas = canvasesRef.current[i];
+      if (!canvas) { setChecking(false); return; }
+      const r = recognizeDigit(digitModel, canvas);
+      if (!r) { setChecking(false); return; }
+      recognizedStr += String(r.digit);
+    }
+    const recognized = parseInt(recognizedStr, 10);
+    const ok = recognized === exercise.result;
+    setFeedback({ ok, recognized });
+    setChecking(false);
+    if (ok) {
+      setDone(true);
+      playSound(Sound.correct);
+      onComplete(true);
+    } else {
+      playSound(Sound.wrong);
+      onError(`${exercise.a} ${symbol} ${exercise.b} = ? (ha scritto ${recognized}, giusto era ${exercise.result})`);
+    }
   };
-  const startDraw = (e) => { isDrawing.current = true; lastPos.current = getPos(e); setHasDrawn(true); };
-  const draw = (e) => {
-    if (!isDrawing.current) return;
-    e.preventDefault();
-    const ctx = canvasRef.current.getContext("2d");
-    const pos = getPos(e);
-    ctx.strokeStyle = "#1E1B2E"; ctx.lineWidth = 3.5; ctx.lineCap = "round"; ctx.lineJoin = "round";
-    ctx.beginPath(); ctx.moveTo(lastPos.current.x, lastPos.current.y); ctx.lineTo(pos.x, pos.y); ctx.stroke();
-    lastPos.current = pos;
+
+  const riprova = () => {
+    setFeedback(null);
+    setDigits({});
+    canvasesRef.current = {};
   };
-  const stopDraw = () => { isDrawing.current = false; };
-  const clearCanvas = () => { const canvas = canvasRef.current; canvas.getContext("2d").clearRect(0, 0, canvas.width, canvas.height); setHasDrawn(false); };
-  const markCorrect = () => { if (done) return; setDone(true); playSound(Sound.correct); onComplete(true); };
-  const markWrong = () => { clearCanvas(); playSound(Sound.wrong); onError(); };
+
+  const markCorrectManual = () => { if (done) return; setDone(true); playSound(Sound.correct); onComplete(true); };
+  const markWrongManual = () => { riprova(); playSound(Sound.wrong); onError(`${exercise.a} ${symbol} ${exercise.b} = ${exercise.result} (corretto a mano dal genitore)`); };
 
   return (
     <>
@@ -444,19 +740,52 @@ function CalcExercise({ exercise, onComplete, onError, playSound }) {
         <span style={styles.calcSymbol}>=</span>
         <span style={styles.calcQuestion}>?</span>
       </div>
-      <div style={styles.canvasWrapBig}>
-        <canvas ref={canvasRef} style={styles.canvasBig} onMouseDown={startDraw} onMouseMove={draw} onMouseUp={stopDraw} onMouseLeave={stopDraw} onTouchStart={startDraw} onTouchMove={draw} onTouchEnd={stopDraw} />
+
+      <div style={{ display: "flex", justifyContent: "center", gap: 12, margin: "14px 0" }}>
+        {Array.from({ length: numDigits }).map((_, i) => (
+          <SingleDigitCanvas key={i} size={100} onStrokeEnd={(c) => handleStrokeEnd(i, c)} />
+        ))}
       </div>
-      <button onClick={clearCanvas} style={styles.clearButton}>🧹 Pulisci</button>
-      <p style={styles.parentNote}>Un adulto controlla: il numero scritto è giusto?</p>
-      {!done ? (
-        <div style={styles.checkRow}>
-          <button onClick={markWrong} disabled={!hasDrawn} style={{ ...styles.wrongCheckButton, opacity: hasDrawn ? 1 : 0.5 }}>❌ Sbagliato</button>
-          <button onClick={markCorrect} disabled={!hasDrawn} style={{ ...styles.correctCheckButton, opacity: hasDrawn ? 1 : 0.5 }}>✅ Giusto</button>
-        </div>
-      ) : (
-        <p style={styles.doneLabel}>✓ Bravissima!</p>
+
+      {digitModelStatus === "training" && (
+        <p style={{ ...styles.parentNote, color: "#7C3AED" }}>🤖 Sto imparando a leggere i numeri (solo la prima volta, un momento)...</p>
       )}
+      {digitModelStatus === "error" && (
+        <p style={{ ...styles.parentNote, color: "#B91C1C" }}>Riconoscimento automatico non disponibile ora — usa la verifica manuale qui sotto.</p>
+      )}
+
+      {!done && digitModelStatus === "ready" && !manualMode && (
+        <>
+          <button
+            onClick={verifica}
+            disabled={!allFilled || checking}
+            style={{ ...styles.finishButton, opacity: allFilled && !checking ? 1 : 0.5, marginBottom: 8 }}
+          >
+            {checking ? "..." : "✨ Controlla"}
+          </button>
+          {feedback && !feedback.ok && (
+            <div style={{ textAlign: "center", marginBottom: 8 }}>
+              <p style={styles.feedbackWrong}>Hai scritto {feedback.recognized}. Riprova! 💪</p>
+              <button onClick={riprova} style={styles.clearButton}>🧹 Riprova</button>
+            </div>
+          )}
+          <p style={{ fontSize: 12, color: "#9CA3AF", textAlign: "center", cursor: "pointer", textDecoration: "underline" }} onClick={() => setManualMode(true)}>
+            Un adulto vuole correggere a mano?
+          </p>
+        </>
+      )}
+
+      {(manualMode || digitModelStatus !== "ready") && !done && (
+        <>
+          <p style={styles.parentNote}>Un adulto controlla: il numero scritto è giusto?</p>
+          <div style={styles.checkRow}>
+            <button onClick={markCorrectManual} style={styles.correctCheckButton}>✅ Giusto</button>
+            <button onClick={markWrongManual} style={styles.wrongCheckButton}>❌ Sbagliato</button>
+          </div>
+        </>
+      )}
+
+      {done && <p style={styles.doneLabel}>✓ Bravissima!</p>}
     </>
   );
 }
@@ -465,7 +794,7 @@ function ReadExercise({ exercise, onComplete, onError, playSound }) {
   const [done, setDone] = useState(false);
   const badge = LANG_BADGE[exercise.lang];
   const markCorrect = () => { if (done) return; setDone(true); playSound(Sound.correct); onComplete(true); };
-  const markWrong = () => { playSound(Sound.wrong); onError(); };
+  const markWrong = () => { playSound(Sound.wrong); onError(exercise.text); };
   return (
     <>
       <p style={styles.eyebrow}>LEGGI AD ALTA VOCE {badge.flag} <span style={{ ...styles.langBadgeInline, background: badge.color }}>{badge.label}</span></p>
@@ -474,8 +803,8 @@ function ReadExercise({ exercise, onComplete, onError, playSound }) {
       <p style={styles.parentNote}>Un adulto ascolta: l'ha letta bene?</p>
       {!done ? (
         <div style={styles.checkRow}>
-          <button onClick={markWrong} style={styles.wrongCheckButton}>❌ Riprova</button>
           <button onClick={markCorrect} style={styles.correctCheckButton}>✅ Bravissima</button>
+          <button onClick={markWrong} style={styles.wrongCheckButton}>❌ Riprova</button>
         </div>
       ) : (
         <p style={styles.doneLabel}>✓ Bravissima!</p>
@@ -490,6 +819,7 @@ function WriteExercise({ exercise, onComplete, onError, playSound }) {
   const lastPos = useRef({ x: 0, y: 0 });
   const [hasDrawn, setHasDrawn] = useState(false);
   const [done, setDone] = useState(false);
+  const [showHint, setShowHint] = useState(false);
   const badge = LANG_BADGE[exercise.lang];
 
   useEffect(() => {
