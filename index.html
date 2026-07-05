@@ -578,9 +578,6 @@ function ParentSection({ errors, onBack, onClear }) {
     </div>
   );
 }
-  if (!result) return null;
-  return (<p style={result === "correct" ? styles.feedbackCorrect : styles.feedbackWrong}>{result === "correct" ? "🎉 Esatto! Hai guadagnato una stella." : "Riprova 💪"}</p>);
-}
 
 function BurstCelebration() {
   const particles = Array.from({ length: 12 }, (_, i) => i);
