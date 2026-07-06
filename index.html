@@ -89,8 +89,8 @@ const MNIST_IMAGES_SPRITE_PATH = 'https://storage.googleapis.com/learnjs-data/mo
 const MNIST_LABELS_PATH = 'https://storage.googleapis.com/learnjs-data/model-builder/mnist_labels_uint8';
 const DIGIT_IMAGE_SIZE = 784;
 const DIGIT_NUM_CLASSES = 10;
-const DIGIT_TRAIN_ELEMENTS = 12000;
-const DIGIT_MODEL_KEY = 'indexeddb://virginia-digit-model-v4';
+const DIGIT_TRAIN_ELEMENTS = 8000;
+const DIGIT_MODEL_KEY = 'indexeddb://virginia-digit-model-v5';
 
 async function loadMnistTrainingData() {
   const resp = await fetch(MNIST_IMAGES_SPRITE_PATH);
@@ -205,6 +205,8 @@ function digitCanvasToTensor(canvas) {
 function useDigitModel() {
   const [model, setModel] = useState(null);
   const [status, setStatus] = useState('init'); // init | training | ready | error
+  const [errorMsg, setErrorMsg] = useState(null);
+  const [trainProgress, setTrainProgress] = useState(0);
   useEffect(() => {
     let cancelled = false;
     (async () => {
@@ -216,10 +218,25 @@ function useDigitModel() {
         return;
       } catch (e) { /* nessun modello in cache, addestro */ }
       try {
+        // Forza il motore veloce (WebGL/GPU); senza, l'addestramento su CPU
+        // può richiedere diversi minuti invece di ~15-20 secondi.
+        try { await tf.setBackend('webgl'); } catch (e) {}
+        await tf.ready();
         setStatus('training');
+        const EPOCHS = 8;
         const { xs, ys } = await loadMnistTrainingData();
         const m = buildDigitModel();
-        await m.fit(xs, ys, { batchSize: 64, epochs: 12, validationSplit: 0.1 });
+        await m.fit(xs, ys, {
+          batchSize: 128,
+          epochs: EPOCHS,
+          validationSplit: 0.1,
+          callbacks: {
+            onEpochEnd: (epoch) => {
+              if (cancelled) return;
+              setTrainProgress(Math.round(((epoch + 1) / EPOCHS) * 100));
+            },
+          },
+        });
         xs.dispose(); ys.dispose();
         if (cancelled) return;
         await m.save(DIGIT_MODEL_KEY);
@@ -227,12 +244,15 @@ function useDigitModel() {
         setStatus('ready');
       } catch (e) {
         console.error('Errore addestramento modello cifre:', e);
-        if (!cancelled) setStatus('error');
+        if (!cancelled) {
+          setErrorMsg((e && e.message) ? e.message : String(e));
+          setStatus('error');
+        }
       }
     })();
     return () => { cancelled = true; };
   }, []);
-  return { model, status };
+  return { model, status, errorMsg, trainProgress };
 }
 
 function recognizeDigit(model, canvas) {
@@ -461,7 +481,7 @@ function LeMissioniDiVirginia() {
   const [errors, setErrors] = useState([]);
   const [showParentSection, setShowParentSection] = useState(false);
   const playSound = useSound(soundOn);
-  const { model: digitModel, status: digitModelStatus } = useDigitModel();
+  const { model: digitModel, status: digitModelStatus, errorMsg: digitModelError, trainProgress: digitTrainProgress } = useDigitModel();
 
   useEffect(() => {
     (async () => {
@@ -605,6 +625,8 @@ function LeMissioniDiVirginia() {
         playSound={playSound}
         digitModel={digitModel}
         digitModelStatus={digitModelStatus}
+        digitModelError={digitModelError}
+        digitTrainProgress={digitTrainProgress}
       />
       {showCelebration === "exercise" && <BurstCelebration />}
       {showCelebration === "mission" && <MissionCelebration missionTitle={currentExercise.missionTitle} />}
@@ -662,14 +684,14 @@ function MissionStrip({ missions, completed, currentMissionIndex }) {
   );
 }
 
-function ExerciseStage({ exercise, missionTitle, isLast, onComplete, onError, playSound, digitModel, digitModelStatus }) {
+function ExerciseStage({ exercise, missionTitle, isLast, onComplete, onError, playSound, digitModel, digitModelStatus, digitModelError, digitTrainProgress }) {
   return (
     <div style={styles.stage}>
       <div style={styles.stageBanner}>
         <span style={styles.stageBannerTitle}>{missionTitle}</span>
       </div>
       <div style={styles.stageCard}>
-        {exercise.type === "calc" && <CalcExercise exercise={exercise} onComplete={onComplete} onError={onError} playSound={playSound} digitModel={digitModel} digitModelStatus={digitModelStatus} />}
+        {exercise.type === "calc" && <CalcExercise exercise={exercise} onComplete={onComplete} onError={onError} playSound={playSound} digitModel={digitModel} digitModelStatus={digitModelStatus} digitModelError={digitModelError} digitTrainProgress={digitTrainProgress} />}
         {exercise.type === "read" && <ReadExercise exercise={exercise} onComplete={onComplete} onError={onError} playSound={playSound} />}
         {exercise.type === "write" && <WriteExercise exercise={exercise} onComplete={onComplete} onError={onError} playSound={playSound} />}
       </div>
@@ -678,7 +700,7 @@ function ExerciseStage({ exercise, missionTitle, isLast, onComplete, onError, pl
   );
 }
 
-function CalcExercise({ exercise, onComplete, onError, playSound, digitModel, digitModelStatus }) {
+function CalcExercise({ exercise, onComplete, onError, playSound, digitModel, digitModelStatus, digitModelError, digitTrainProgress }) {
   const [done, setDone] = useState(false);
   const [digits, setDigits] = useState({}); // { 0: {digit, confidence}|null, 1: ... }
   const [checking, setChecking] = useState(false);
@@ -748,10 +770,24 @@ function CalcExercise({ exercise, onComplete, onError, playSound, digitModel, di
       </div>
 
       {digitModelStatus === "training" && (
-        <p style={{ ...styles.parentNote, color: "#7C3AED" }}>🤖 Sto imparando a leggere i numeri (solo la prima volta, un momento)...</p>
+        <>
+          <p style={{ ...styles.parentNote, color: "#7C3AED" }}>
+            🤖 Sto imparando a leggere i numeri: {digitTrainProgress}% (solo la prima volta)
+          </p>
+          <p style={{ fontSize: 11, color: "#9CA3AF", textAlign: "center", marginTop: -6, marginBottom: 8 }}>
+            Non chiudere questa pagina finché non arriva al 100% — altrimenti si riparte da capo.
+          </p>
+        </>
       )}
       {digitModelStatus === "error" && (
-        <p style={{ ...styles.parentNote, color: "#B91C1C" }}>Riconoscimento automatico non disponibile ora — usa la verifica manuale qui sotto.</p>
+        <>
+          <p style={{ ...styles.parentNote, color: "#B91C1C" }}>Riconoscimento automatico non disponibile ora — usa la verifica manuale qui sotto.</p>
+          {digitModelError && (
+            <p style={{ fontSize: 11, color: "#B91C1C", fontFamily: "monospace", textAlign: "center", wordBreak: "break-word", marginBottom: 8 }}>
+              {digitModelError}
+            </p>
+          )}
+        </>
       )}
 
       {!done && digitModelStatus === "ready" && !manualMode && (
