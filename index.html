@@ -267,6 +267,47 @@ function recognizeDigit(model, canvas) {
   return { digit: best, confidence: data[best] };
 }
 
+// Store delle correzioni: vive per tutta la sessione (fuori da React, non si
+// azzera quando i componenti esercizio si smontano tra un esercizio e l'altro)
+const digitLearningStore = { items: [], busy: false };
+
+// Ogni volta che sappiamo con certezza cosa Virginia ha scritto (il risultato
+// atteso dell'esercizio), usiamo quell'immagine+etichetta vera per rifinire
+// il modello sulla sua calligrafia reale — sia che l'abbia letta giusta o no.
+async function fineTuneOnRealExample(model, canvasesByIndex, trueDigits) {
+  if (!model || digitLearningStore.busy) return;
+  digitLearningStore.busy = true;
+  try {
+    for (let i = 0; i < trueDigits.length; i++) {
+      const canvas = canvasesByIndex[i];
+      if (!canvas) continue;
+      const tensor = digitCanvasToTensor(canvas);
+      if (!tensor) continue;
+      digitLearningStore.items.push({ tensor, digit: trueDigits[i] });
+    }
+    // Limite di sicurezza sulla memoria: tiene solo gli ultimi 300 esempi
+    while (digitLearningStore.items.length > 300) {
+      digitLearningStore.items.shift().tensor.dispose();
+    }
+    if (digitLearningStore.items.length < 2) { digitLearningStore.busy = false; return; }
+
+    const xsAll = tf.concat(digitLearningStore.items.map((c) => c.tensor), 0);
+    const labelsData = new Float32Array(digitLearningStore.items.length * 10);
+    digitLearningStore.items.forEach((c, i) => { labelsData[i * 10 + c.digit] = 1; });
+    const ysAll = tf.tensor2d(labelsData, [digitLearningStore.items.length, 10]);
+
+    model.compile({ optimizer: tf.train.adam(0.0003), loss: 'categoricalCrossentropy', metrics: ['accuracy'] });
+    await model.fit(xsAll, ysAll, { epochs: 6, batchSize: Math.min(64, digitLearningStore.items.length), shuffle: true });
+    xsAll.dispose();
+    ysAll.dispose();
+    await model.save(DIGIT_MODEL_KEY);
+  } catch (e) {
+    console.error('Errore fine-tuning su esempio reale:', e);
+  } finally {
+    digitLearningStore.busy = false;
+  }
+}
+
 // Piccolo canvas per una singola cifra, usato nell'esercizio di calcolo
 function SingleDigitCanvas({ onStrokeEnd, size = 90 }) {
   const canvasRef = useRef(null);
@@ -722,8 +763,9 @@ function CalcExercise({ exercise, onComplete, onError, playSound, digitModel, di
     setChecking(true);
     setFeedback(null);
     let recognizedStr = "";
+    const canvasesSnapshot = { ...canvasesRef.current };
     for (let i = 0; i < numDigits; i++) {
-      const canvas = canvasesRef.current[i];
+      const canvas = canvasesSnapshot[i];
       if (!canvas) { setChecking(false); return; }
       const r = recognizeDigit(digitModel, canvas);
       if (!r) { setChecking(false); return; }
@@ -733,6 +775,13 @@ function CalcExercise({ exercise, onComplete, onError, playSound, digitModel, di
     const ok = recognized === exercise.result;
     setFeedback({ ok, recognized });
     setChecking(false);
+
+    // Impara dalla scrittura reale di Virginia: sappiamo già qual è la cifra
+    // giusta in ogni casella (il risultato atteso), quindi ogni tentativo
+    // diventa un esempio di allenamento vero, giusto o sbagliato che sia.
+    const trueDigits = String(exercise.result).padStart(numDigits, "0").split("").map(Number);
+    fineTuneOnRealExample(digitModel, canvasesSnapshot, trueDigits);
+
     if (ok) {
       setDone(true);
       playSound(Sound.correct);
@@ -749,8 +798,22 @@ function CalcExercise({ exercise, onComplete, onError, playSound, digitModel, di
     canvasesRef.current = {};
   };
 
-  const markCorrectManual = () => { if (done) return; setDone(true); playSound(Sound.correct); onComplete(true); };
-  const markWrongManual = () => { riprova(); playSound(Sound.wrong); onError(`${exercise.a} ${symbol} ${exercise.b} = ${exercise.result} (corretto a mano dal genitore)`); };
+  const markCorrectManual = () => {
+    if (done) return;
+    if (digitModel) {
+      const snapshot = { ...canvasesRef.current };
+      const trueDigits = String(exercise.result).padStart(numDigits, "0").split("").map(Number);
+      fineTuneOnRealExample(digitModel, snapshot, trueDigits);
+    }
+    setDone(true);
+    playSound(Sound.correct);
+    onComplete(true);
+  };
+  const markWrongManual = () => {
+    riprova();
+    playSound(Sound.wrong);
+    onError(`${exercise.a} ${symbol} ${exercise.b} = ${exercise.result} (corretto a mano dal genitore)`);
+  };
 
   return (
     <>
