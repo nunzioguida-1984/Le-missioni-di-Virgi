@@ -222,9 +222,10 @@ function useDigitModel() {
         // può richiedere diversi minuti invece di ~15-20 secondi.
         try { await tf.setBackend('webgl'); } catch (e) {}
         await tf.ready();
-        setStatus('training');
+        setStatus('downloading');
         const EPOCHS = 8;
         const { xs, ys } = await loadMnistTrainingData();
+        setStatus('training');
         const m = buildDigitModel();
         await m.fit(xs, ys, {
           batchSize: 128,
@@ -390,40 +391,47 @@ function numToWordsIT(n) {
 // ---------- GENERATORE ADDIZIONI/SOTTRAZIONI con bias su 16/17 ----------
 function randInt(min, max) { return Math.floor(Math.random() * (max - min + 1)) + min; }
 
-function generateAddition(forceTarget) {
-  let result, a, b;
-  if (forceTarget) {
-    result = forceTarget;
-    a = randInt(1, result - 1);
-    b = result - a;
+function generateAddition() {
+  const roll = Math.random();
+  let a, b;
+  if (roll < 0.4) {
+    // facile: una cifra + una cifra
+    a = randInt(1, 9);
+    b = randInt(1, 9);
+  } else if (roll < 0.8) {
+    // medio: due cifre + una cifra (in ordine casuale)
+    const twoDigit = randInt(10, 40);
+    const oneDigit = randInt(1, 9);
+    if (Math.random() < 0.5) { a = twoDigit; b = oneDigit; } else { a = oneDigit; b = twoDigit; }
   } else {
-    a = randInt(1, 30);
-    b = randInt(1, Math.min(50 - a, 30));
-    result = a + b;
+    // difficile (20%): due cifre + due cifre
+    a = randInt(10, 30);
+    b = randInt(10, Math.min(48 - a, 30));
   }
-  return { a, b, result, type: "add" };
+  return { a, b, result: a + b, type: "add" };
 }
 
-function generateSubtraction(forceTarget) {
-  let result, a, b;
-  if (forceTarget) {
-    // a sempre due cifre, b sempre una cifra, risultato forzato a 16 o 17
-    result = forceTarget;
+function generateSubtraction() {
+  const roll = Math.random();
+  let a, b;
+  if (roll < 0.4) {
+    // facile: una cifra meno una cifra (a >= b)
+    a = randInt(2, 9);
+    b = randInt(1, a);
+  } else if (roll < 0.8) {
+    // medio: due cifre meno una cifra
+    a = randInt(11, 45);
     b = randInt(1, 9);
-    a = result + b;
-    if (a > 50) { b = randInt(1, a - 41); a = result + b; }
   } else {
-    // a sempre a due cifre (10-50), b sempre a una cifra (1-9)
-    a = randInt(11, 50);
-    b = randInt(1, 9);
-    result = a - b;
+    // difficile (20%): due cifre meno due cifre
+    a = randInt(20, 50);
+    b = randInt(10, a - 1);
   }
-  return { a, b, result, type: "sub" };
+  return { a, b, result: a - b, type: "sub" };
 }
 
-function makeCalcExercise(opType, forceBias) {
-  const target = forceBias ? (Math.random() < 0.5 ? 16 : 17) : null;
-  const calc = opType === "add" ? generateAddition(target) : generateSubtraction(target);
+function makeCalcExercise(opType) {
+  const calc = opType === "add" ? generateAddition() : generateSubtraction();
   const correctWord = numToWordsIT(calc.result);
   return {
     type: "calc",
@@ -600,8 +608,8 @@ function buildMissions() {
       id: `mission-${m}`,
       title: `Missione ${m + 1}`,
       exercises: [
-        { id: `m${m}-add`, ...makeCalcExercise("add", m % 2 === 0) },
-        { id: `m${m}-sub`, ...makeCalcExercise("sub", m % 2 === 1) },
+        { id: `m${m}-add`, ...makeCalcExercise("add") },
+        { id: `m${m}-sub`, ...makeCalcExercise("sub") },
         { id: `m${m}-read`, type: "read", lang: readLang, text: readItem.text, emoji: readItem.emoji },
         { id: `m${m}-write`, type: "write", lang: writeLang, sentence: writeItem.sentence, emoji: writeItem.emoji },
       ],
@@ -943,13 +951,23 @@ function CalcExercise({ exercise, onComplete, onError, playSound, digitModel, di
         ))}
       </div>
 
+      {digitModelStatus === "downloading" && (
+        <>
+          <p style={{ ...styles.parentNote, color: "#7C3AED" }}>
+            🤖 Scarico i dati per imparare a leggere i numeri (dipende dalla connessione, un momento)...
+          </p>
+          <p style={{ fontSize: 11, color: "#9CA3AF", textAlign: "center", marginTop: -6, marginBottom: 8 }}>
+            Puoi continuare a fare gli esercizi con la verifica manuale nel frattempo.
+          </p>
+        </>
+      )}
       {digitModelStatus === "training" && (
         <>
           <p style={{ ...styles.parentNote, color: "#7C3AED" }}>
             🤖 Sto imparando a leggere i numeri: {digitTrainProgress}% (solo la prima volta)
           </p>
           <p style={{ fontSize: 11, color: "#9CA3AF", textAlign: "center", marginTop: -6, marginBottom: 8 }}>
-            Non chiudere questa pagina finché non arriva al 100% — altrimenti si riparte da capo.
+            Non chiudere la scheda del browser finché non arriva al 100% — muoverti tra gli esercizi va bene.
           </p>
         </>
       )}
